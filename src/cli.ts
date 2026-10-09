@@ -18,6 +18,7 @@ import { allSpecs, type SpecContext, type SpecResult, type ToolSpec } from './sp
 
 /** Flags that never take a value. */
 const BOOLEAN_FLAGS = new Set([
+  'confirm',
   'probe',
   'status',
   'unseen',
@@ -64,10 +65,16 @@ export function parseArgs(argv: readonly string[]): Parsed {
       if (equals >= 0) {
         value = body.slice(equals + 1)
       } else if (BOOLEAN_FLAGS.has(key)) {
-        value = true
+        const next = argv[index + 1]
+        if (next === 'true' || next === 'false') {
+          value = next
+          index += 1
+        } else value = true
       } else {
         const next = argv[index + 1]
-        if (next === undefined || next.startsWith('--')) {
+        // Non-boolean options consume one value, including values beginning '--'.
+        // Use --key=value when passing a value identical to another option.
+        if (next === undefined) {
           value = true
         } else {
           value = next
@@ -148,11 +155,20 @@ async function buildArgs(parsed: Parsed, specName: string): Promise<Record<strin
     return Number.isFinite(num) ? num : fallback
   }
   switch (specName) {
+    case 'qqmail_accounts': {
+      const action = flagString(parsed, 'action') || parsed.positional[0] || 'list'
+      const config = action === 'add' ? await buildArgs(parsed, 'qqmail_config') : {}
+      if (typeof config === 'string') return config
+      return { ...config, action, ...(parsed.flags.confirm !== undefined ? { confirm: flagBool(parsed, 'confirm') } : {}) }
+    }
     case 'qqmail_status':
       return { probe: flagBool(parsed, 'probe') }
     case 'qqmail_config': {
       const args: Record<string, unknown> = {}
       for (const key of [
+        'id',
+        'label',
+        'default-account',
         'preset',
         'email',
         'imap-host',
@@ -300,6 +316,7 @@ async function buildArgs(parsed: Parsed, specName: string): Promise<Record<strin
 
 /** Commands in the CLI, mapped to their spec. */
 const COMMANDS: Record<string, string> = {
+  accounts: 'qqmail_accounts',
   status: 'qqmail_status',
   config: 'qqmail_config',
   folders: 'qqmail_folders',
@@ -344,7 +361,9 @@ export const USAGE = `qqmail — QQ 邮箱 / 通用 IMAP·SMTP 邮箱的命令�
 
 配置：qqmail config --email someone@qq.com（授权码建议走环境变量 QQMAIL_AUTH_CODE）
   配置文件：DSH_HOME 下的 dsh-qqmail.json（默认 ~/.dsh/dsh-qqmail.json，0600）
-  所有命令都支持 --json 输出结构化结果。
+  所有命令支持 --account id或邮箱、--json。
+  新增：qqmail config --account __new__ --id work --email you@example.com --preset qq-exmail
+  管理：qqmail accounts [list|setDefault|remove] --account work [--confirm]
 `
 
 /** Entry point. */
@@ -376,6 +395,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return 2
   }
   const args = await buildArgs(parsed, specName)
+  if (typeof args !== 'string' && parsed.flags.account !== undefined) args.account = flagString(parsed, 'account')
   if (typeof args === 'string') {
     process.stderr.write(args + '\n')
     await service.closeAll()

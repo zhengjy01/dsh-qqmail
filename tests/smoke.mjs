@@ -60,6 +60,14 @@ async function isolate() {
 
 const tempDir = await isolate()
 const realConfig = path.join(process.env.HOME ?? '', '.dsh', 'dsh-qqmail.json')
+/**
+ * Identity of the real config before the run starts.
+ *
+ * The isolation assertion at the end compares against this rather than testing for
+ * absence: a developer who has actually configured the plugin owns a real config, and
+ * "the file does not exist" would then fail for reasons unrelated to this test.
+ */
+const realConfigBefore = await stat(realConfig).then(({ mtimeMs, size }) => mtimeMs + ':' + size).catch(() => 'missing')
 
 console.log('\n▸ 参数规格 → JSON Schema')
 {
@@ -185,7 +193,7 @@ console.log('\n▸ 配置存储（临时文件 + 0600）')
   await store.patch({ email: 'someone@qq.com', authCode: 'abcdefghijklmnop' })
   const mode = (await stat(store.file)).mode & 0o777
   check('配置文件权限为 0600', mode === 0o600, '0o' + mode.toString(8))
-  check('email 域名自动识别 preset', store.readSync().preset === 'qq')
+  check('email 域名自动识别 preset', store.readSync().accounts[0].preset === 'qq')
 
   const view = store.view()
   check('已配置', view.configured === true)
@@ -297,8 +305,8 @@ console.log('\n▸ 工具名册随 readOnly 变化')
   check('只读模式无写工具', !readOnlyNames.some((name) => ['qqmail_send', 'qqmail_reply', 'qqmail_mark', 'qqmail_move', 'qqmail_delete'].includes(name)))
   check('只读模式含核心读工具', ['qqmail_status', 'qqmail_config', 'qqmail_list', 'qqmail_search', 'qqmail_read', 'qqmail_attachment', 'qqmail_folders'].every((name) => readOnlyNames.includes(name)))
   check('读写模式含全部写工具', ['qqmail_send', 'qqmail_reply', 'qqmail_mark', 'qqmail_move', 'qqmail_delete'].every((name) => writeNames.includes(name)))
-  check('读写模式共 12 个工具', writeNames.length === 12, String(writeNames.length))
-  check('只读模式共 7 个工具', readOnlyNames.length === 7, String(readOnlyNames.length))
+  check('读写模式共 13 个工具', writeNames.length === 13, String(writeNames.length))
+  check('只读模式共 8 个工具', readOnlyNames.length === 8, String(readOnlyNames.length))
   check('工具名唯一', new Set(writeNames).size === writeNames.length)
 }
 
@@ -313,7 +321,7 @@ console.log('\n▸ 每个工具的描述与参数都可转 schema')
       if (typeof node.type !== 'string') bad = spec.name + '.' + key + ' 缺 type'
     }
   }
-  check('全部 12 个工具通过', bad === '', bad)
+  check('全部 13 个工具通过', bad === '', bad)
   const send = buildSpecs(false).find((spec) => spec.name === 'qqmail_send')
   check('qqmail_send.to 是必填', toJsonSchema(send.parameters).required.includes('to'))
 }
@@ -327,13 +335,29 @@ console.log('\n▸ CLI 参数解析')
   check('布尔 flag', parsed.flags.unseen === true && parsed.flags.json === true)
   const send = parseArgs(['send', '--to', 'a@b.com', '--attach', 'x.pdf', '--attach', 'y.pdf'])
   check('可重复 flag 累积', Array.isArray(send.flags.attach) && send.flags.attach.length === 2)
+  check('签名值保留双横线首行', parseArgs(['config', '--signature', '--\nfixture signature']).flags.signature === '--\nfixture signature')
+  check('普通双横线开头的值被保留', parseArgs(['config', '--signature', '--fixture']).flags.signature === '--fixture')
+  check('签名值可为双横线', parseArgs(['config', '--signature', '--']).flags.signature === '--')
   const equals = parseArgs(['list', '--limit=50'])
   check('--key=value 形式', equals.flags.limit === '50')
+  for (const key of ['read-only', 'permanent', 'confirm']) {
+    for (const literal of ['true', 'false']) {
+      const parsed = parseArgs(['delete', '--' + key, literal, '100'])
+      check('--' + key + ' ' + literal + ' 消费字面量并保留 uid', parsed.flags[key] === literal && parsed.positional.join() === '100')
+      check('--' + key + '=' + literal + ' 兼容', parseArgs(['delete', '--' + key + '=' + literal]).flags[key] === literal)
+    }
+  }
 }
 
 console.log('\n▸ 隔离性断言')
-check('真实配置未被创建', await stat(realConfig).then(() => 'exists').catch(() => 'missing') === 'missing' || realConfig !== path.join(process.env.DSH_HOME ?? '', 'dsh-qqmail.json'))
-check('临时配置目录已写入', (await readFile(process.env.DSH_QQMAIL_CONFIG, 'utf8').catch(() => '')).length >= 0)
+{
+  // The run must stay inside the temp dir — resolving to the real path would itself be the bug.
+  check('配置路径在临时目录内', (process.env.DSH_QQMAIL_CONFIG ?? '').startsWith(tempDir))
+  // And the real config must come out untouched, whether or not it already existed.
+  const realAfter = await stat(realConfig).then(({ mtimeMs, size }) => mtimeMs + ':' + size).catch(() => 'missing')
+  check('真实配置未被改动', realAfter === realConfigBefore, realConfigBefore + ' → ' + realAfter)
+  check('临时配置目录已写入', (await readFile(process.env.DSH_QQMAIL_CONFIG, 'utf8').catch(() => '')).length >= 0)
+}
 
 await rm(tempDir, { recursive: true, force: true })
 
